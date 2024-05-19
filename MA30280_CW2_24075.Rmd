@@ -1,0 +1,914 @@
+---
+title: "Applied Data Science Assignment 2"
+output:
+  pdf_document:
+    keep_tex: true
+    number_sections: true
+  html_document:
+    df_print: paged
+  word_document: default
+header-includes: \usepackage{float} \floatplacement{figure}{H}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.pos = 'h')
+```
+
+```{r, echo = FALSE}
+########################################## READ ME ##########################################################
+# I had to do some funny things to force the figures not to float up the page for the output PDF. 
+# On math stack exchange there seems to be quite a lot of different solutions for this based on what version 
+# of R you are using. When I knit it as a PDF it works for me, and the figures are in the correct place. 
+# I hope it works for you too
+# here is the article I followed :)
+# https://stackoverflow.com/questions/29696172/how-to-hold-figure-position-with-figure-caption-in-pdf-output-of-knitr
+
+# P.S I did make a pretty summary table using vtable, but I couldn't use it because it floats 
+# to the top of the pdf every time :(
+# Big sad moment... had to settle for the summary command :( 
+
+# PLEASE COMPILE ME AS A PDF! Well it works okay as HTML, but the figure captions are unlabeled
+# (i spend hours trying to figure out why but I couldn't get this sorted :(... )
+############################################################################################################
+```
+# Part I
+
+## Question 1
+
+We are measuring heat intensity in a continuous manner, which suggests a normal distribution (Occam's razor). 
+$$
+t_i \sim \mbox{N}(\mu_i, \sigma^2),\quad \mu_i = \beta_0 + f(x_i,y_i)
+$$
+Where $f$ is a thin plate regression spline (isotropic). 
+
+## Question 2
+
+We are effectively measuring performance of adverts by intensity of clicks. This suggests a normal distribution (Occam's razor). We might expect the advert size to follow some non-linear relationship. This is because regardless of size, adverts at the top of the webpage will get more views than adverts at the bottom of the webpage. 
+$$
+C_i \sim \mbox{N}(\mu_i, \sigma^2),\quad \mu_i = \beta_0 + f_1(x_i,y_i) + f_2(A_i)
+$$
+Where $f_1$ is a thin plate regression spline (isotropic) and $f_2$ is a cubic regression spline. 
+
+## Question 3
+
+We have 100 plants segregated into groups of 20, each group sprayed with a different concentration. This suggests a binomial distribution with 20 trials and a probability of infection for the $i$-th group. We choose the logit link transformation since we require probabilities. We might expect the relationship to be non-linear since when increasing concentration gradually, the infection will reduce faster up until a certain point, where it will slow down (i.e. increasing the concentration of the spray after a certain concentration is not significantly more effective than the previous concentration). 
+
+$$
+I_i \sim \mbox{Binomial}(20, p_i),\quad \mbox{logit}(p_i) = \beta_0 + f(c_i)
+$$
+Where $p_i$ is the probability of infection for group $i$, and $f$ is a cubic regression spline. 
+
+## Question 4
+
+We try the default distribution (normal) since there are no obvious choices from the context of the problem (Occam's razor). We expect some seasonal non-linear pattern with temperature. It is difficult to say whether there will be a seasonal trend with monthly costs of wool. This is because if the Scottish manufacturer buys wool in bulk from a global market, then this trend could be very non-linear and not necessary cyclic (economy is becoming increasingly unstable). However, the number of hats they need to produce is strongly related to how cold it is which suggests a non-linear interaction term between temperature and wool. 
+$$
+c_i \sim \mbox{N}(\mu_i, \sigma^2),\quad \mu_i = \beta_0 + f_1(t_i) + f_2(w_i) + f_3(t_i,w_i)
+$$
+Where $f_1$ is a cyclic cubic regression spline, $f_2$ is a cyclic cubic regression spline, and $f_3$ is a tensor product spline (wool and temperature are not on the same scale)
+
+## Question 5
+
+From context, two events happen: elephant in the $i-$th grid square, elephant not in $i-$th grid square. This implies binomial with 1 trial i.e. bernoulli. We choose the logit link transformation since we require probabilities. 
+$$
+E_i \sim \mbox{Bernoulli}(p_i),\quad \mbox{logit}(p_i) = \beta_0 + f(x_i,y_i)
+$$
+where $p_i$ is the probability of finding an elephant in the $i$-th grid cell, and $f$ is a thin plate regression spline (isotropic). 
+
+# Part II
+
+## Question 1: Briefly examine and comment on the data using some simple summaries/plots.
+
+```{r, echo = FALSE, warning=FALSE, message = FALSE}
+# loading packages + defining a global function
+library(mgcv)
+library(tidyverse)
+load("MA30280_cwdat_2024.RData")
+library(vtable)
+library(kableExtra)
+library(gridExtra)
+library(gratia)
+# summary function for the summary dataframes
+data_frame_summary <- function(list_mod) {
+  deviance_explained <- sapply(list_mod, function(mod) summary(mod)[["dev.expl"]])
+  REML <- sapply(list_mod, function(mod) summary(mod)[["sp.criterion"]][["REML"]])
+  AIC_mod <- sapply(list_mod, AIC)
+  df <- data.frame(d_expl = deviance_explained, REML = REML, AIC = AIC_mod)
+  return(df)
+}
+```
+
+We initially conducted some exploratory data analysis
+
+```{r, echo = FALSE, fig.cap = "Pairs plot to show the relationships between variables in dataset"}
+# pairs plot
+pairs(dat, main='Pairs plot to show the relationships between variables in dataset')
+```
+
+We observe some relationships we expect to see: 
+
+* `visitors` is positively correlated with `RPuptake`, `hotel.prices`, `time` and `year`. Reduced MoMO tickets for residents increase accessibility, and increase in hotel prices is an indicator of increasing number of tourists in the area. 
+
+* There is no significant relationship between `hotel.prices` and `RPuptake`. Intuitively, residents are unlikely to book hotels near where they live. 
+
+* There non-linear relationship between `week.of.year` and `hotel.prices` which indicates seasonal increases and decreases in hotel prices. This relationship is very similar to the relationship between `visitors` and `week.of.year`. We can also visualize this relationship further in the following time series plots. 
+
+```{r, echo = FALSE, fig.height = 10, fig.width = 10, fig.cap = "How visitors, hotel prices and resident pass uptake change over time"}
+
+# making the names pretty 
+data = dat
+colnames(data)[5]= 'Resident pass uptake'
+colnames(data)[6] = 'Hotel prices'
+colnames(data)[3] = 'Visitors'
+
+# convert to date object so the time series looks good 
+data$week.of.year <- as.Date(paste(data$year, data$week.of.year, '1'), format='%Y %U %u')
+# fact wrapped time series using pivot longer
+data %>% pivot_longer( cols = c(`Resident pass uptake`, `Hotel prices`, Visitors) , names_to = 'measures') %>% 
+  rename('Level' = value) %>% ggplot(aes(x = week.of.year, y = Level)) + geom_line() + 
+  facet_grid(rows = vars(measures),scales = 'free') + 
+  labs(title = 'How visitors, hotel prices and resident pass uptake change over time', 
+       xlab = 'Week of year')
+```
+
+We observe that the `hotel.prices` time series and `visitors` time series seem to contain a fair amount of short-term noisy auto-correlation, and a strong seasonal trend in the form of a yearly cycle. It is also clear that there seems to be an increase in average number of visitors every year. The uptake of resident passes seems to increase and then stagnate.
+
+We note that our `time` data is not equally spaced (Appendix question 1). This is important to note since normally when applying the relevant time series methodologies we theoretically should have regularly spaced data with no missing values. 
+
+```{r,echo = FALSE, fig.cap = "ACF for number of visitors to MoMO per week (MA30085: Time Series)"}
+# autocorrelation function 
+acf(ts(dat$visitors), main = 'ACF for number of visitors to MoMO per week')
+```
+
+We observe strong auto correlations at a large range of lags. It will be critical to take of this auto-correlation when trying to fit a model if we would like to understand any predictor relationships. 
+
+## Question 2: Fit a model with a normal response distribution and response variable 'square root of `visitors` ' that estimates how visitor numbers are changing over time
+
+### Bullet Point 1: Explain your model specification choices and summarise what you conclude from the output.
+
+When choosing a good fitting model, it is often a good idea to look at similar problems for inspiration. Our model specifications are therefore inspired by Emiko Dupont's 'Temperature of Ciaro' model. From question 1, we observed that there was seasonal cyclic behaviour within seasons for the number of visitors visiting MoMO, with the average number of visitors increasing year by year. This is very similar to the 'Temperature of Ciaro' model, where seasonal increases and decreases in temperature, gradually increasing year by year where observed, perhaps due to global warming. Therefore, we consider models in the form, 
+
+$$
+\sqrt{\text{visitors}}_i = \beta_0 + f_1(\text{time}_i) +  f_2(\text{week.of.year}_i) 
+$$
+We investigate the cases where $f_1$ is a cyclic cubic regression spline or p-spline respectively. We also consolidate our findings with a comparison to a polynomial approach (Appendix question 2)
+
+```{r, echo = FALSE}
+# summary function for the summary dataframes
+data_frame_summary <- function(list_mod) {
+  # deviance explained`
+  `deviance explained` <- sapply(list_mod, function(mod) summary(mod)[["dev.expl"]])
+  # GCV
+  GCV = sapply(list_mod, function(mod) summary(mod)[["sp.criterion"]][["GCV.Cp"]])
+  # model coefficients
+  `EDF time` <- sapply(list_mod, function(mod) summary(mod)[["edf"]][1])
+  `EDF week of year` <- sapply(list_mod, function(mod) summary(mod)[["edf"]][2])
+  # AIC
+  AIC_mod <- sapply(list_mod, AIC)
+  # data frame with all the values in
+  df <- data.frame(`EDF time` =`EDF time` ,
+                   `EDF week of year`= `EDF week of year`, 
+                   # round to 1 decimal place so the table looks pretty 
+                   `deviance explained` = paste(round(100*`deviance explained`, 2), "%", sep=""), 
+                   GCV = GCV, 
+                   AIC = AIC_mod)
+  return(df)
+}
+```
+
+
+```{r}
+mod1 = gam(sqrt(visitors)~s(time ,bs = 'cr', k=10) + s(week.of.year, bs="cp",k=10), 
+           data = dat, gamma = 1.5)
+mod2 = gam(sqrt(visitors)~s(time ,bs = 'cr', k=20) + s(week.of.year, bs="cp",k=20), 
+           data = dat, gamma = 1.5)
+mod3 = gam(sqrt(visitors)~s(time ,bs = 'cr', k=30) + s(week.of.year, bs="cp",k=30), 
+           data = dat, gamma = 1.5)
+```
+
+```{r, echo = FALSE}
+# make the model summary table using the data_frame_summary function
+list_mod = list(mod1,mod2,mod3)
+summarydat = data.frame(c(10,20,30), data_frame_summary(list_mod))
+colnames(summarydat)[1] = 'K'
+colnames(summarydat)[2] = 'EDF time'
+colnames(summarydat)[3] = 'EDF week of the year'
+colnames(summarydat)[4] = 'Deviance explained'
+# so the table doesnt float up the pdf
+kable(summarydat, booktabs=TRUE, caption= "Model summary statistics table")  %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+One could argue that when $K$ was either 10 or 20, the EDF of $f_2$ was getting close to the maximum complexity of $f_2$. Therefore, incorporating the aim of keeping the basis size as small as possible, taking $K$ equal to 30 certainly seemed like a reasonable basis size ($16\ll 29$). Indeed, we observe that a basis size of 30 for both smooth terms is able to capture the behaviour of the response variable well with a deviance explained of $95.31\%$. We observe that the AIC and GCV lowest for basis size of 30, indicating that the increased basis size is significant, and that we are not overfitting. There is no significant difference between the use of a cyclic p-spline or cubic regression spline (table 8). However, the cyclic p-spline specification for $f_2$ had very marginally lower GCV and AIC. 
+
+GCV with $\gamma = 1.5$ was chosen over REML due to superior prediction performance measured using 10-fold cross validation (table 9). We believe that a low prediction error is very important in this application since we would like to predict missing values of visitors in question 3. 
+
+```{r, echo = FALSE}
+# summary stats for model 
+summary(mod3)
+```
+
+The approximate p-values from the `summary` command show that both smooths $f_1$ and $f_2$ are very significant. The significant p-value associated with $f_1$ suggests that there is a significant trend of increasing numbers of visitors to the museum over time. 
+
+```{r, echo = FALSE, fig.cap = "Partial effect plots for mod3"}
+# effect plots for model 3
+par(mfrow = c(1,2))
+plot(mod3, residuals = TRUE, cex = 0.5, scheme = 1, ylab = 'Partial effect', 
+     main = 'Smooth for time', xlab = 'Time', select = 1)
+plot(mod3, residuals = TRUE, cex = 0.5, scheme = 1, ylab = 'Partial effect', 
+     main = 'Smooth for week of the year', xlab = 'Week of the year', select = 2)
+```
+
+```{r, echo = FALSE, results='hide',fig.keep='all', fig.cap = "Model fit diagnostics for mod3"}
+# model check plots for fit
+par(mfrow=c(2,2))
+gam.check(mod3)
+```
+
+Table 1 and figure 4 show the estimated smooth terms and corresponding partial effect plots for `mod3`. We are not surprised to see a wiggly seasonal pattern for $f_2$. This is because at MoMO there are special exhibitions and events through the year, in particular, during school holidays. We observe three peaks: Easter break (peak approximately week 16), summer break (peak approximately week 30) and Autumn half term (peak approximately week 42). The $f_1$ smooth confidence interval excludes 0, and therefore provides more evidence that there is an significant increase in visitors over time. The residual plots also confirms that it is a reasonable fit. 
+
+### Bullet point 2: What might be the reason for modelling the square root of `visitors` rather than `visitors`. 
+
+We choose to perform a variance stabilization transform on the response variable, `visitors`; precisely, we choose to model the response variable as $\sqrt{\text{visitors}}$. This is because we observe, from the model diagnostic plots, that the variance seems to be non-constant when `visitors` is modelled as the response variable. In the linear predictor vs residuals plot, the variation around zero changes for increasing values of the linear predictor, which is inconsistent with our white noise assumption. 
+
+```{r}
+mod_var_unstab = gam(visitors~s(time ,k=30) + s(week.of.year, bs="cp",k=30), 
+                     data = dat, gamma=1.5)
+```
+
+```{r, echo = FALSE, results='hide',fig.keep='all', fig.cap = "Model fit diagnostics for model fit without variance stabilisation"}
+# model check plots for fit
+par(mfrow=c(2,2))
+gam.check(mod_var_unstab)
+```
+
+### Bullet point 3: Create a line plot of the data overlaid by the predictions from your model
+
+```{r, fig.width = 15, fig.height=8, echo=FALSE, fig.cap = "Line plot of MoMO data overlayed by model predictions of visitors by time"}
+
+# new data for predictions
+new_dat<-data.frame(time = dat$time, week.of.year = dat$week.of.year)
+# perform predictions
+pred = predict(mod3,newdata=new_dat,se.fit=TRUE)
+# store predictions + CI 
+df_preds = data.frame(new_dat, pred) %>%
+  mutate(lower = (fit - 1.96 * se.fit)^2,
+         upper = (fit + 1.96 * se.fit)^2)
+df_preds$fit = (df_preds$fit)^2
+# Line plot of MoMO data overlayed by model predictions of visitors by time
+dat %>% ggplot(aes(x = time , y = visitors, color = 'Original values')) + #"#3366FF"
+  geom_line(alpha = 0.4) + 
+  
+  geom_line(data = df_preds ,
+            aes(x = time, y=fit, color = "Predicted values")) + 
+  scale_color_manual(values = c('Original values' = 'black', "Predicted values" = "#FF0000")) + 
+  labs(color = "Legend", x = 'Time' , y = 'Visitors', 
+       title = 'Line plot of MoMO data overlayed by model predictions of visitors by time')
+
+```
+
+## Question 3: There are some weeks during the period where the visitor numbers were not recorded
+
+### Bullet point 1: Use your model to estimate these missing values.
+
+```{r, echo=FALSE}
+## This is how I worked out which numbers below for the filter %in%
+#setdiff(1:416, dat$time)
+#setdiff(1:416, dat$time) %% 52
+
+# Complete predictions for data! 
+new_data_unseen = data.frame(time=1:416, week.of.year = 1:416 %% 52)
+pred = predict(mod3,newdata=new_data_unseen,se.fit=TRUE)
+df_preds = data.frame(new_data_unseen, pred) %>%
+  mutate(lower = fit - 1.96 * se.fit,
+         upper = fit + 1.96 * se.fit)
+
+df_preds$fit = round((df_preds$fit)^2)
+predictions_missing = df_preds %>%
+  filter(time %in% c(85, 129, 167, 187, 207, 270, 277, 299, 307, 324))
+
+# Removing the index column and creating table
+colnames(predictions_missing)[3] = 'Predicted visitors'
+colnames(predictions_missing)[1] = 'Time'
+colnames(predictions_missing)[2] = 'Week of year'
+predictions_missing = data.frame(Time = predictions_missing$Time, 
+           `Week of year` = predictions_missing$`Week of year`, 
+           `Predicted visitors` = predictions_missing$`Predicted visitors`)
+colnames(predictions_missing)[3] = 'Predicted number of visitors'
+colnames(predictions_missing)[1] = 'Time'
+colnames(predictions_missing)[2] = 'Week of the year'
+kable(predictions_missing, caption = "Model (mod3) estimates of missing visitor values") %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+
+### Bullet point 2: Create a line plot of the data showing the predicted points
+
+```{r, fig.width = 15, fig.height=8, echo=FALSE, fig.cap= "Line plot to show the predicted visitor values by the model over the time, including predictions for missing values"}
+## This is how I worked out which numbers below for the filter %in%
+#setdiff(1:416, dat$time)
+#setdiff(1:416, dat$time) %% 52
+
+# complete predictions for data 
+new_data_unseen = data.frame(time=1:416, week.of.year = 1:416 %% 52)
+pred = predict(mod3,newdata=new_data_unseen,se.fit=TRUE)
+df_preds = data.frame(new_data_unseen, pred) %>%
+  mutate(lower = (fit - 1.96 * se.fit)^2,
+         upper = (fit + 1.96 * se.fit)^2)
+df_preds$fit = (df_preds$fit)^2
+predictions_missing = df_preds %>%
+  filter(time %in% c(85, 129, 167, 187, 207, 270, 277, 299, 307, 324))
+
+
+# plot graph with legend
+legend_colors <- c('Original values' = 'black', "Predicted points" = "blue", "95% C.I" = "#FF0000", "Predicted values" = "#FF0000")
+
+dat %>% ggplot(aes(x = time , y = visitors, color = 'Original values')) + #"#3366FF"
+  geom_line(alpha = 0.4) + 
+  
+  geom_line(data = df_preds ,
+            aes(x = time, y=fit, color = "Predicted values")) + 
+  
+  geom_point(data =predictions_missing, 
+             aes(x = time, y = fit, color = "Predicted points"), size = 2) +
+  
+  geom_line(data = df_preds ,
+            aes(x = time, y=lower, color = "95% C.I"), 
+            linetype = "dashed", 
+            alpha = 0.5) + 
+  
+  geom_line(data = df_preds ,aes(x = time, y=upper), 
+            color = "#FF0000", 
+            linetype = "dashed", 
+            alpha = 0.5) + 
+  
+  scale_color_manual(values = legend_colors) +
+  guides(color = guide_legend(override.aes = list(linetype = c("dashed","solid", "solid", "solid")))) +
+  labs(color = "Legend", x = 'Time' , y = 'Visitors', 
+       title = 'Line plot of MoMO data showing predicted visitors for missing days')
+```
+
+### Bullet point 3: Comment on the appropriateness of using the model for this purpose
+
+We observe from figure 8 that there seems to be some slight underfitting for earlier times in peak summer periods. The model response variable was squared to undo the variance stabilizing transform, which slightly increases the uncertainty. Therefore, the number of visitors at `time` 187 seems to be slightly underestimated. However, the rest of the predicted points (blue points on figure 8) seem to be visually sensible considering the original data. We somewhat expect this. We use a linear combination of different basis functions associated with smooths $f_1$ and $f_2$ in a fixed time interval (1 to 416). We have a high deviance explained which means that the basis functions will be good at explaining the data in their respective local neighbourhoods. We have also taken care to reduce the chance of the model being overfitted. The model has a low AIC and has been fitted by minimizing the GCV which captures in-sample prediction error. In conclusion, we feel that the model is in general appropriate for this purpose. 
+
+## Question 4: in January 2011 the city council introduced a residents’ pass that gives local residents heavily discounted entry to museums, including MoMO. The variable RPuptake records the weekly uptake of this pass. You have also been given the data hotel.prices which records the average price per night of a hotel room in the city.
+
+### Bullet point 1: Can these variables be used to improve your model from Q2 above?
+
+Initially we try models of the following form, 
+
+$$
+\sqrt{\text{visitors}}_i = \beta_0 + f_1(\text{time}_i) +  f_2(\text{week.of.year}_i) + f_3(\text{hotel.prices}_i) + f_4(\text{RPuptake}_i)
+$$
+
+```{r, fig.width = 15, fig.height=8}
+mod4 = gam(sqrt(visitors)~s(time ,bs = 'cr', k=30) + s(week.of.year, bs="cp",k=30) + 
+             s(RPuptake, k=30) + s(hotel.prices, k=30), data = dat, gamma = 1.5)
+```
+
+```{r, echo = FALSE, fig.width = 12, fig.height=10, fig.cap = "Partial effect plots for mod4"}
+# summary command for mod stats 
+summary(mod4)
+par(mfrow = c(2,2))
+# plot the different partial effects with informative axis labels and title
+plot(mod4, residuals = TRUE, cex = 0.5, scheme = 1, ylab = 'Partial effect', 
+     main = 'Smooth for time', xlab = 'Time', select = 1)
+
+plot(mod4, residuals = TRUE, cex = 0.5, scheme = 1, ylab = 'Partial effect', 
+     main = 'Smooth for week of the year', xlab = 'Week of the year', select = 2)
+
+plot(mod4, residuals = TRUE, cex = 0.5, scheme = 1, ylab = 'Partial effect', 
+     main = 'Smooth for resident pass uptake', xlab = 'Resident pass uptake',  
+     select = 3)
+
+plot(mod4, residuals = TRUE, cex = 0.5, scheme = 1, ylab = 'Partial effect', 
+     main = 'Smooth for hotel prices', xlab = 'Hotel prices',  select = 4)
+
+```
+
+
+We notice that the p-value for the `time` smooth, $f_1$, is no longer significant, and indeed, the confidence interval includes 0. The p-values associated with the smooths $f_3$ and $f_4$ are significant. The smooths $f_3$ and $f_4$ clearly steal the explanatory power away from $f_1$, indicating that the variables `RPuptake` and `hotel.prices` are more important in explaining the trend in increasing visitors. The EDF value for smooths $f_3$ and $f_4$ is 1, and remains equal to 1 when increasing the number of basis functions significantly higher than 30.  This indicates that a linear relationship is perhaps preferred (with two very similar competing models it is best to use the simpler one (Occam's razor)). Therefore, we use the variables `hotel.prices` and `RPuptake` additively in the model without being wrapped by a smooth function. This prompts the following model. 
+
+$$
+\sqrt{\text{visitors}}_i = \beta_0 + f_2(\text{week.of.year}_i) + \text{hotel.prices}_i + \text{RPuptake}_i
+$$
+
+```{r}
+k= 30
+mod5 = gam(sqrt(visitors)~ s(week.of.year, bs="cp",k=k) + 
+             RPuptake + hotel.prices, data = dat, gamma = 1.5)
+```
+
+```{r, echo = FALSE}
+# summary model stats command
+summary(mod5)
+```
+
+```{r, echo = FALSE, results='hide',fig.keep='all', fig.cap = "Model diagonstic plots for mod5"}
+# plot the model fit check plots in 2x2 grid
+par(mfrow=c(2,2))
+gam.check(mod5)
+# function to compute summary stats for q4
+data_frame_summary_q4 <- function(list_mod) {
+  `deviance explained` <- sapply(list_mod, function(mod) summary(mod)[["dev.expl"]])
+  GCV = sapply(list_mod, function(mod) summary(mod)[["sp.criterion"]][["GCV.Cp"]])
+  AIC_mod <- sapply(list_mod, AIC)
+  # append AIC deviance and GCV to dataframe object 
+  df <- data.frame(`deviance explained` = paste(round(100*`deviance explained`, 2), "%", sep=""), 
+                   GCV = GCV, 
+                   AIC = AIC_mod)
+  return(df)
+}
+```
+
+```{r, echo = FALSE}
+# produce the pretty table for model statistics using data_frame_summary_q4
+table123 = data.frame(c('mod3', 'mod5'),data_frame_summary_q4(list(mod3,mod5)))
+colnames(table123)[1] = 'Model'
+colnames(table123)[2] = 'Deviance explained'
+kable(table123, caption = "Model summary statistics table") %>% 
+  kable_styling(latex_options = "hold_position")
+```
+
+We observe that with the new specification (`mod5`) all terms are significant. The deviance explained of `mod5` is larger than `mod3` which implies that the inclusion of the terms `hotel.prices` and `RPuptake` has given the model more explanatory power. It seems like when separating the seasonal yearly cycle component, the variables `RPuptake` and `hote.prices` are more important at explaining the increase in visitors to MoMO than the variable `time`. From table 3 we also observe that the GCV and AIC for `mod5` are significantly smaller than `mod3`. We also observe that the residual plots confirm that `mod5` is a reasonable fit. Therefore, we can be confident that `mod5`, which includes the variables `RPuptake` and `hotel.prices`, is more adequate at explaining the number of visitors over the years 2011 to 2018 than `mod3`. 
+
+### Bullet point 2: Describe and discuss the differences between different modelling approaches.
+
+We investigate three alternative modelling approaches for `mod5`
+
+* Polynomial approaches (A similar investigation is in Appendix Question 2)
+* No smoothing
+* Interaction terms
+
+#### Investigating polynomial approaches\
+
+We proceed to investigate a different modelling approach by approximating $f_2(\text{week.of.year}_i)$ by a low degree polynomial (degree of 2) and a higher degree polynomial (degree of 10). The aim of this illustration is to show that GAMs can be better at modelling non-linear relationships. 
+
+```{r, fig.width = 15, fig.height = 9}
+degree=2
+formula1<-as.formula(paste("sqrt(visitors)~ hotel.prices + RPuptake+ ",
+                           paste0("I(week.of.year^",1:degree,")",collapse="+"),sep=""))
+mod_poly = lm(formula=formula1,data=dat)
+
+degree=10
+formula2<-as.formula(paste("sqrt(visitors)~ hotel.prices + RPuptake+ ",
+                           paste0("I(week.of.year^",1:degree,")",collapse="+"),sep=""))
+mod_poly1 = lm(formula=formula2,data=dat)
+```
+
+```{r, fig.width = 15, fig.height = 9, echo = FALSE, fig.cap = "Line plots of MoMO data overlayed by model predictions of visitors by time for polynomials of different degrees"}
+# summary stats + AIC for models
+summary(mod_poly)
+print(paste0('AIC: ', AIC(mod_poly)))
+
+summary(mod_poly1)
+print(paste0('AIC: ', AIC(mod_poly1)))
+
+new_dat = data.frame(time = dat$time, week.of.year = dat$week.of.year, RPuptake = dat$RPuptake, hotel.prices = dat$hotel.prices) # time = dat$time,
+
+# fit and predictions
+pred<-predict(mod_poly,newdata=new_dat,se.fit=TRUE)
+pred = predict(mod_poly,newdata=new_dat,se.fit=TRUE)
+df_preds = data.frame(new_dat, pred) %>%
+  mutate(lower = (fit - 1.96 * se.fit)^2,
+         upper = (fit + 1.96 * se.fit)^2)
+df_preds$fit = (df_preds$fit)^2
+# first plot for the degree 2 polynomial
+p1=dat %>% ggplot(aes(x = time , y = visitors, color = 'Original values')) + #"#3366FF"
+  geom_line(alpha = 0.4) + 
+  
+  geom_line(data = df_preds ,
+            aes(x = time, y=fit, color = "Predicted values")) + 
+  scale_color_manual(values = c('Original values' = 'black', "Predicted values" = "#FF0000")) + 
+  labs(color = "Legend", x = 'Time' , y = 'Visitors', 
+       title = 'Line plot of MoMO data overlayed by model predictions of visitors by time (degree 2)')
+
+new_dat = data.frame(time = dat$time, week.of.year = dat$week.of.year, RPuptake = dat$RPuptake, hotel.prices = dat$hotel.prices) # time = dat$time,
+# preductions
+pred<-predict(mod_poly1,newdata=new_dat,se.fit=TRUE)
+pred = predict(mod_poly1,newdata=new_dat,se.fit=TRUE)
+# hold predictions and CI
+df_preds = data.frame(new_dat, pred) %>%
+  mutate(lower = (fit - 1.96 * se.fit)^2,
+         upper = (fit + 1.96 * se.fit)^2)
+df_preds$fit = (df_preds$fit)^2
+# second plot for the degree 10 polynomial
+p2=dat %>% ggplot(aes(x = time , y = visitors, color = 'Original values')) + #"#3366FF"
+  geom_line(alpha = 0.4) + 
+  
+  geom_line(data = df_preds ,
+            aes(x = time, y=fit, color = "Predicted values")) + 
+  scale_color_manual(values = c('Original values' = 'black', "Predicted values" = "#FF0000")) + 
+  labs(color = "Legend", x = 'Time' , y = 'Visitors', 
+       title = 'Line plot of MoMO data overlayed by model predictions of visitors by time (degree 10)') 
+# put them for combined figure with cap ^^
+grid.arrange(p1, p2, ncol=1)
+```
+
+Although all terms for the degree two model are significant, it is clear from figure 11 that the it fit is not ideal. Naturally, increasing the polynomial order the predicted values become closer to the data. We observe this in the summary statistics with increasing $R^2$ values. However, not all the terms for the degree 10 model are significant; the interpretation being that the model has a few terms which are quite similar so divides out all the explanatory power. With the GAM approach, we have far more flexibility and interpretability. Interpreting one single significant smooth is far easier and more meaningful than interpreting high order polynomial coefficients. 
+
+#### Investigation into the use of no smoothing\
+
+We now investigate how the use of smoothing parameters impacts model fit and performance. 
+
+```{r}
+k=30
+mod6 = gam(sqrt(visitors)~ s(week.of.year, bs="cp",k=k, fx=TRUE) + 
+             RPuptake + hotel.prices, data = dat, gamma = 1.5)
+```
+
+```{r, echo = FALSE, fig.cap = "Partial effects plot for mod6 (mod5 without smoothing)"}
+# summary statistics
+summary(mod6)
+# plot the partial effects 
+plot(mod6, residuals = TRUE, cex = 0.5, scheme = 1, ylab = 'Partial effect', 
+     main = 'Smooth for week of year', xlab = 'Week of year')
+```
+
+
+We observe that although the deviance explained for `mod6` is higher than `mod5`, the smooth is now very wiggly. This might imply that the smooth is modelling the noise, rather than any underlying pattern in the data (or overfitting the data). We therefore expect that the model with no smoothing parameter (`mod6`) will have a higher cross validation score than the model with smoothing parameter (`mod5`). 
+
+```{r, echo = FALSE}
+set.seed(1232)
+k=30
+mod6 = gam(sqrt(visitors)~ s(week.of.year, bs="cp",k=k, fx=TRUE) + 
+             RPuptake + hotel.prices, data = dat, gamma = 1.5)
+
+mod5 = gam(sqrt(visitors)~ s(week.of.year, bs="cp",k=k) + 
+             RPuptake + hotel.prices, data = dat, gamma = 1.5)
+
+# This code was adapted from this article: https://rpubs.com/harriet122/976401
+# for some reason when I change the names it messes up (GCV_fit...)
+# so apologies for the poor variable names! 
+# this performs k-fold cross validation
+fold_ids = sample(1:10, nrow(dat), replace = TRUE)
+preds = data.frame(matrix(rep(NA, times = nrow(dat), each = 2), ncol = 2))
+names(preds) = c("REML", "GCV")
+for (i in 1:10) {
+  GCV_fit = gam(sqrt(visitors)~ s(week.of.year, bs="cp",k=k) + 
+             RPuptake + hotel.prices, gamma=1.5, data = dat[fold_ids != i,])
+  REML_fit = gam(sqrt(visitors)~ s(week.of.year, bs="cp",k=k, fx = TRUE) + 
+             RPuptake + hotel.prices, data = dat[fold_ids != i,], gamma = 1.5)
+  preds$GCV[fold_ids == i] = predict(GCV_fit, newdata=dat[fold_ids == i,])
+  preds$REML[fold_ids == i] = predict(REML_fit, newdata=dat[fold_ids == i,])
+}
+table_wiggly = data.frame(colMeans((preds - sqrt(dat$visitors))^2)) ## MSE
+
+# making the table below (messy)
+colnames(table_wiggly)[1] = 'CV-score'
+table_wiggly = data.frame(c('mod6','mod5'), table_wiggly$'CV-score')
+colnames(table_wiggly)[1] = 'Model'
+colnames(table_wiggly)[2] = '10-fold cross validation score'
+
+table_wiggly = data.frame(table_wiggly, data_frame_summary_q4(list(mod6,mod5)))
+colnames(table_wiggly)[2] = '10-fold cross validation score'
+colnames(table_wiggly)[3] = 'Deviance explained'
+kable(table_wiggly, caption = "Model statistics summary table") %>% kable_styling(latex_options = "hold_position")
+
+```
+
+We observe that the model with the smoothing parameter (`mod5`) has a lower 10-fold cross validation score than the model with no smoothing parameter (`mod6`). The use of no smoothing has also increased the AIC and GCV which is undesirable. We can therefore confirm that smoothing is beneficial for our fitted GAM. 
+
+#### Investigation into modelling with interactions\
+
+
+We might suspect that if there is a particularly large uptake on the resident pass, and there is a spike in the hotel prices, then this may indicate a larger effect on the number of visitors to MoMO. We investigate this hypothesis by investigating the use of a tensor product spline in `mod5` to account for an interaction effect between `hotel.prices` and `RPuptake`. 
+
+```{r}
+mod7 = gam(sqrt(visitors)~ s(week.of.year, bs="cp", k=k) + 
+             te(hotel.prices, RPuptake, bs = c('cr','cr'), k=c(10,10)), 
+           data = dat, gamma = 1.5)
+```
+
+```{r, echo = FALSE, fig.cap = "Partial effect plots for mod7", fig.width = 15, fig.height=6}
+# summary statistics
+summary(mod7)
+par(mfrow = c(1,2))
+# partial effect plots
+plot(mod7, scheme = 1, select = 1, ylab = 'Partial effect',xlab = 'Week of the year')
+# title to be consistant with 3d plot formatting
+mtext("Smooth for week of the year", side = 3, line = 1)
+plot(mod7, scheme = 1, select = 2, main = 'Partial effect', 
+     xlab = 'Hotel Prices', ylab = 'Resident pass uptake')
+# title since main is taken by the z axis
+mtext("Tensor product smooth for resident pass \nuptake and hotel prices", side = 3, line = 1)
+# pretty table using kable
+table123 = data.frame(c('mod5', 'mod7'),data_frame_summary_q4(list(mod5,mod7)))
+colnames(table123)[1] = 'Model'
+colnames(table123)[2] = 'Deviance explained'
+kable(table123, caption = "Model summary statistics table") %>% 
+  kable_styling(latex_options = "hold_position")
+```
+
+We notice that with the inclusion of the interaction term, both smooths are significant. Large values of `hotel.prices` and `RPuptake` result in a larger effect than small values of `RPuptake` and `hotel.prices`. Although, since the EDF of the tensor product spline is three, we may investigate the following model for comparison. 
+
+```{r}
+mod8 = gam(sqrt(visitors)~ s(week.of.year, bs="cp",k=30) + 
+             RPuptake + hotel.prices + RPuptake:hotel.prices, data = dat, gamma = 1.5)
+```
+
+```{r,echo = FALSE}
+summary(mod8)
+```
+
+```{r, echo = FALSE, results='hide',fig.keep='all', fig.cap = "Model diagnostic plots for mod8"}
+par(mfrow = c(2,2))
+gam.check(mod8)
+```
+
+```{r, echo = FALSE}
+# pretty table using kable for the model summary stats
+table123 = data.frame(c('mod5', 'mod7', 'mod8'),data_frame_summary_q4(list(mod5,mod7,mod8)))
+colnames(table123)[1] = 'Model'
+colnames(table123)[2] = 'Deviance explained'
+kable(table123, caption = "Model summary statistics table") %>% kable_styling(latex_options = "hold_position")
+```
+
+The GCV and AIC for `mod5` are higher than for `mod7` and `mod8`, of which the respective scores are approximately the same. We also verify that the residual plots are sensible for both `mod7` (figure 19) and `mod8` (figure 14). We can confirm that the interaction terms in `mod7` and `mod8` are better at modelling the weekly visitors at MoMO over 2011-2018. 
+
+## Question 5a: The museum director would like to be able to forecast how many visitors to expect next week, next month or even next year. Discuss whether your models can be used for this purpose.
+
+### Fitted model from question 2 (`mod3`): 
+
+We observed strong auto-correlation in figure 3. Therefore, we should verify that the model treats this auto-correlation appropriately. 
+
+```{r, echo=FALSE, fig.width = 9, fig.height = 6, fig.cap = "Time series model diagnostic plots for mod3 (MA30085 Time Series)"}
+k=30
+mod3 = gam(sqrt(visitors)~s(time ,bs = 'cr', k=k) + s(week.of.year, bs="cp",k=k), 
+           data = dat, gamma = 1.5)
+mod_Res = (mod3$residuals)
+par(mfrow = c(1,2))
+plot(ts(mod_Res), main = 'Time series plot of model residuals', 
+     ylab= 'Model residuals')
+acf(mod_Res, main = 'ACF plot of model residuals')
+#library(LSTS)
+#Box.Ljung.Test(mod_Res, lag = NULL, main = NULL)
+```
+
+We observe that the mean of the residuals is close to zero, the spread of residuals is constant over time, and the sample autocorrelation function between the residuals is negligible. Therefore, we can confirm that we have controlled for that non-linear trend in the auto-correlation certainly for the time period we have data for.
+
+```{r,fig.width = 15, fig.height = 8, echo=FALSE, fig.cap="Extrapolation of mod3 predictions for weekly visitors outside  historical time interval"}
+# make the predictions + forecasting and store in dataframe with confidence interval 
+new_dat<-data.frame(time = 1:700, week.of.year = 1:700 %% 52)
+pred = predict(mod3,newdata=new_dat,se.fit=TRUE)
+df_preds = data.frame(new_dat, pred) %>%
+  mutate(lower = (fit - 1.96 * se.fit)^2,
+         upper = (fit + 1.96 * se.fit)^2)
+df_preds$fit = (df_preds$fit)^2
+# plot the predictions against the original data to show the extrapolation effect 
+dat %>% ggplot(aes(x = time , y = visitors, color = 'Original values')) + #"#3366FF"
+  geom_line(alpha = 0.4) + 
+  geom_line(data = df_preds ,
+            aes(x = time, y=lower, color = "95% C.I"), 
+            linetype = "dashed", 
+            alpha = 0.5) + 
+  
+  geom_line(data = df_preds ,aes(x = time, y=upper), 
+            color = "#FF0000", 
+            linetype = "dashed", 
+            alpha = 0.5)+
+  geom_line(data = df_preds ,
+            aes(x = time, y=fit, color = "Predicted values")) + 
+  scale_color_manual(values = c('Original values' = 'black', "Predicted values" = "#FF0000", "95% C.I" = "#FF0000")) + 
+  labs(color = "Legend", x = 'Time' , y = 'Visitors', 
+       title = 'Line plot of MoMO data overlayed by forecasted mod3 predictions') 
+```
+
+
+Using figures 15 and 16, we can conclude that very short term forecasting, i.e. forecasting the number of visitors next week, seems okay.
+
+However, we should be concerned about using `mod3` for forecasting months or years into the future. We observe that the forecast seems to follow the same behaviour that was observed at the end of the observed time interval. Despite the predicted continued yearly cycle, the trend is not that similar to the trend observed historically (i.e. the data the model learnt on). Although we expect the uncertainty to increase as we forecast years into the future, it seems to be growing in a less constrained way. This is because the smooth basis functions corresponding to `time` only have local knowledge. To elaborate, the splines are segmented across a fixed time interval (1 to 416), so they must only have knowledge about what is happening in their unique local neighbourhood on the fixed time interval. Therefore, unreasonable forecasting behaviour is observed when predicting years into the future for this particular model. 
+
+### Fitted model from question 4 (`mod5`, `mod8`):
+
+Since there is only one smooth present, that cannot be extrapolated, these models do not have the same forecasting issue as `mod3`. However, the inclusion of the terms `hotel.prices` and `RPuptake` make forecasting, even short term, difficult due to the need to forecast these variables too. If these values could be predicted accurately, then `mod5` and `mod8` are certainly good for forecasting due to the models ability to control the auto-correlation (figures 20 and 21) and being well fitted (discussed in question 4). Therefore, one added practical bonus of `mod5` and `mod8` is the ability to produce accurate forecasts for different economic scenarios based on hypothetical values for `hotel.prices` and `RPuptake`.  We know, by the benefit of hind sight, that COVID-19 forced UK lockdowns in 2020. Therefore, modelling hypothetical economic scenarios would help MoMO mitigate future damages. 
+
+# Appendix
+
+## Part II
+
+### Question 1
+
+```{r, echo = FALSE, fig.show='hold'}
+# I did build a table but it kept on floating up the page so i just put the 
+# summary stats in the end. Sorry! 
+dataa = dat %>% select(-year)
+summary_table = st(dataa, out = 'kable', title = 'Summary statistics for MoMO data')
+```
+Summary of MoMO data using `summary` command. 
+```{r, echo = FALSE}
+summary(dat)
+```
+
+### Question 2
+
+#### Polynomial example case study\
+
+We illustrate an example of modelling the change in weekly visitors over time using the polynomial approach. We try increasingly high order polynomials for `week.of.year`, and add the `time` variable to account for the increasing trend in weekly visitors. 
+
+```{r, fig.width = 15, fig.height = 9, warning=FALSE, message = FALSE}
+degree=2
+formula1<-as.formula(paste("sqrt(visitors)~ time + ",
+                           paste0("I(week.of.year^",1:degree,")",collapse="+"),sep=""))
+mod_poly = lm(formula=formula1,data=dat)
+
+degree=10
+formula2<-as.formula(paste("sqrt(visitors)~ time + ",
+                           paste0("I(week.of.year^",1:degree,")",collapse="+"),sep=""))
+mod_poly1 = lm(formula=formula2,data=dat)
+
+degree=20
+formula3<-as.formula(paste("sqrt(visitors)~ time + ",
+                           paste0("I(week.of.year^",1:degree,")",collapse="+"),sep=""))
+mod_poly2 = lm(formula=formula3,data=dat)
+```
+
+```{r, fig.width = 15, fig.height = 13, echo = FALSE, fig.cap = "Predictions for increasingly high polynomial degree fits", warning=FALSE, message = FALSE}
+summary(mod_poly)
+print(paste0('AIC: ', AIC(mod_poly)))
+
+summary(mod_poly1)
+print(paste0('AIC: ', AIC(mod_poly1)))
+
+summary(mod_poly2)
+print(paste0('AIC: ', AIC(mod_poly2)))
+
+
+new_dat = data.frame(time = dat$time, week.of.year = dat$week.of.year, RPuptake = dat$RPuptake, hotel.prices = dat$hotel.prices) # time = dat$time,
+pred<-predict(mod_poly,newdata=new_dat,se.fit=TRUE)
+#main=paste("Polynomial regression, degree = ",p,sep="")
+pred = predict(mod_poly,newdata=new_dat,se.fit=TRUE)
+df_preds = data.frame(new_dat, pred) %>%
+  mutate(lower = (fit - 1.96 * se.fit)^2,
+         upper = (fit + 1.96 * se.fit)^2)
+df_preds$fit = (df_preds$fit)^2
+p1=dat %>% ggplot(aes(x = time , y = visitors, color = 'Original values')) + #"#3366FF"
+  geom_line(alpha = 0.4) + 
+  
+  geom_line(data = df_preds ,
+            aes(x = time, y=fit, color = "Predicted values")) + 
+  scale_color_manual(values = c('Original values' = 'black', "Predicted values" = "#FF0000")) + 
+  labs(color = "Legend", x = 'Time' , y = 'Visitors', 
+       title = 'Line plot of MoMO data overlayed by model predictions of visitors by time (degree 2)')
+
+new_dat = data.frame(time = dat$time, week.of.year = dat$week.of.year, RPuptake = dat$RPuptake, hotel.prices = dat$hotel.prices) # time = dat$time,
+pred<-predict(mod_poly1,newdata=new_dat,se.fit=TRUE)
+#main=paste("Polynomial regression, degree = ",p,sep="")
+pred = predict(mod_poly1,newdata=new_dat,se.fit=TRUE)
+df_preds = data.frame(new_dat, pred) %>%
+  mutate(lower = (fit - 1.96 * se.fit)^2,
+         upper = (fit + 1.96 * se.fit)^2)
+df_preds$fit = (df_preds$fit)^2
+p2=dat %>% ggplot(aes(x = time , y = visitors, color = 'Original values')) + #"#3366FF"
+  geom_line(alpha = 0.4) + 
+  
+  geom_line(data = df_preds ,
+            aes(x = time, y=fit, color = "Predicted values")) + 
+  scale_color_manual(values = c('Original values' = 'black', "Predicted values" = "#FF0000")) + 
+  labs(color = "Legend", x = 'Time' , y = 'Visitors', 
+       title = 'Line plot of MoMO data overlayed by model predictions of visitors by time (degree 10)')
+
+
+new_dat = data.frame(time = dat$time, week.of.year = dat$week.of.year, RPuptake = dat$RPuptake, hotel.prices = dat$hotel.prices) # time = dat$time,
+pred<-predict(mod_poly2,newdata=new_dat,se.fit=TRUE)
+#main=paste("Polynomial regression, degree = ",p,sep="")
+pred = predict(mod_poly2,newdata=new_dat,se.fit=TRUE)
+df_preds = data.frame(new_dat, pred) %>%
+  mutate(lower = (fit - 1.96 * se.fit)^2,
+         upper = (fit + 1.96 * se.fit)^2)
+df_preds$fit = (df_preds$fit)^2
+p3=dat %>% ggplot(aes(x = time , y = visitors, color = 'Original values')) + #"#3366FF"
+  geom_line(alpha = 0.4) + 
+  
+  geom_line(data = df_preds ,
+            aes(x = time, y=fit, color = "Predicted values")) + 
+  scale_color_manual(values = c('Original values' = 'black', "Predicted values" = "#FF0000")) + 
+  labs(color = "Legend", x = 'Time' , y = 'Visitors', 
+       title = 'Line plot of MoMO data overlayed by model predictions of visitors by time (degree 20)')
+
+grid.arrange(p1, p2, p3, ncol=1)
+```
+
+We observe that when modelling `week.of.year` with a degree polynomial, despite all the parameters being significant, underfitting occurs, which results in a low $R^2$ and adjusted $R^2$ score. We observe that increasing the polynomial order results in an increasingly high $R^2$ and adjusted $R^2$ value, but fewer of the model terms are significant. This is because the model now has a lot of terms that are quite similar, so divides the explanatory power, so less of the coefficients are important in explaining significant parts of the data individually. For a fitted polynomial degree of 20, we observe some `NA` values for coefficients simply because some terms in the model matrix are so similar that they are numerically linearly dependent. This behaviour is observed because the required fit is very non-linear. This motivates the need to use a GAM to get a good smooth fit. 
+
+#### Figures and tables\
+
+```{r, echo = FALSE}
+k=10
+mod1_a = gam(sqrt(visitors)~s(time ,bs = 'cr', k=k) + s(week.of.year, bs="cc",k=k), data = dat, gamma = 1.5)
+k=20
+mod2_a = gam(sqrt(visitors)~s(time ,bs = 'cr', k=k) + s(week.of.year, bs="cc",k=k), data = dat, gamma = 1.5)
+k=30
+mod3_a = gam(sqrt(visitors)~s(time ,bs = 'cr', k=k) + s(week.of.year, bs="cc",k=k), data = dat, gamma = 1.5)
+```
+
+```{r, echo = FALSE}
+# pretty table for summary statistics
+list_mod = list(mod1_a,mod2_a,mod3_a)
+summarydat = data.frame(c(10,20,30), data_frame_summary(list_mod))
+colnames(summarydat)[1] = 'K'
+colnames(summarydat)[2] = 'EDF time'
+colnames(summarydat)[3] = 'EDF week of the year'
+colnames(summarydat)[4] = 'Deviance explained'
+kable(summarydat, booktabs=TRUE, 
+      caption= "mod3 with cyclic cubic regression spline summary statistics table")  %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+
+```{r, echo = FALSE}
+set.seed(113114)
+# This code was adapted from this article: https://rpubs.com/harriet122/976401
+# follows k fold cross validation from machine learning 1 
+fold_ids = sample(1:10, nrow(dat), replace = TRUE)
+preds = data.frame(matrix(rep(NA, times = nrow(dat), each = 2), ncol = 2))
+names(preds) = c("REML", "GCV")
+for (i in 1:10) {
+  GCV_fit = gam(sqrt(visitors)~ s(time, bs = 'cr', k=k)+s(week.of.year, bs="cp",k=k),
+                gamma=1.5,
+                data = dat[fold_ids != i,])
+  REML_fit = gam(sqrt(visitors)~ s(time, bs = 'cr', k=k)+s(week.of.year, bs="cp",k=k),
+                 data = dat[fold_ids != i,], method = "REML")
+  preds$GCV[fold_ids == i] = predict(GCV_fit, newdata=dat[fold_ids == i,])
+  preds$REML[fold_ids == i] = predict(REML_fit, newdata=dat[fold_ids == i,])
+}
+CVS = colMeans((preds - sqrt(dat$visitors))^2)
+CVS = data.frame(CVS)
+colnames(CVS)[1] = '10-fold cross validation score'
+kable(CVS, booktabs=TRUE, caption= "Cross validation comparison table (MA20278 Machine Learning 1)")  %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+
+### Question 4
+
+
+```{r, fig.width = 15, fig.height = 8, echo=FALSE, fig.cap = "Line plot for mod5 predictions of visitors over time"}
+new_dat = data.frame(time = dat$time, 
+                     week.of.year = dat$week.of.year, 
+                     RPuptake = dat$RPuptake, 
+                     hotel.prices = dat$hotel.prices)
+
+pred = predict(mod5,newdata=new_dat,se.fit=TRUE)
+df_preds = data.frame(new_dat, pred) %>%
+  mutate(lower = (fit - 1.96 * se.fit)^2,
+         upper = (fit + 1.96 * se.fit)^2)
+df_preds$fit = (df_preds$fit)^2
+dat %>% ggplot(aes(x = time , y = visitors, color = 'Original values')) + #"#3366FF"
+  geom_line(alpha = 0.4) + 
+  
+  geom_line(data = df_preds ,
+            aes(x = time, y=fit, color = "Predicted values")) + 
+  scale_color_manual(values = c('Original values' = 'black', "Predicted values" = "#FF0000")) + 
+  labs(color = "Legend", x = 'Time' , y = 'Visitors', 
+       title = 'Line plot of MoMO data overlayed by model predictions of visitors by time')
+
+#Due to `mod5` not being dependent on the variable `time` (although still dependent on `week.of.year`), we observe that the fit is less smooth due to a combination of `hotel.prices` and `RPuptake` explaining the trend in increasing weekly visitors. 
+
+```
+
+```{r, echo = FALSE, fig.cap = "Model diagnostics for mod7", results='hide',fig.keep='all'}
+par(mfrow = c(2,2))
+gam.check(mod7)
+```
+
+### Question 5
+
+
+```{r, echo=FALSE, fig.width = 9, fig.height = 6, fig.cap = "Time series model diagnostic plots for mod5 (MA30085 Time Series)"}
+k=30
+mod_Res = (mod5$residuals)
+par(mfrow = c(1,2))
+plot(ts(mod_Res), main = 'Time series plot of model residuals', 
+     ylab= 'Model residuals')
+acf(mod_Res, main = 'ACF plot of model residuals')
+#library(LSTS)
+#Box.Ljung.Test(mod_Res, lag = NULL, main = NULL)
+```
+
+```{r, echo=FALSE, fig.width = 9, fig.height = 6, fig.cap = "Time series model diagnostic plots for mod8 (MA30085 Time Series)"}
+k=30
+mod_Res = (mod8$residuals)
+par(mfrow = c(1,2))
+plot(ts(mod_Res), main = 'Time series plot of model residuals', 
+     ylab= 'Model residuals')
+acf(mod_Res, main = 'ACF plot of model residuals')
+#library(LSTS)
+#Box.Ljung.Test(mod_Res, lag = NULL, main = NULL)
+```
+
+
+# Generative AI statement
+
+No generative AI was used in the creation of this report
+
+```{r, echo = FALSE}
+# Candidate number: 24075
+```
+
+
+
